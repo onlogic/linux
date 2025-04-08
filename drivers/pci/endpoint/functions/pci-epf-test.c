@@ -735,8 +735,6 @@ static int pci_epf_test_set_bar(struct pci_epf *epf)
 		ret = pci_epc_set_bar(epc, epf->func_no, epf->vfunc_no,
 				      epf_bar);
 		if (ret) {
-			pci_epf_free_space(epf, epf_test->reg[bar], bar,
-					   PRIMARY_INTERFACE);
 			dev_err(dev, "Failed to set BAR%d\n", bar);
 			if (bar == test_reg_bar)
 				return ret;
@@ -877,6 +875,20 @@ static int pci_epf_test_alloc_space(struct pci_epf *epf)
 	return 0;
 }
 
+static void pci_epf_test_free_space(struct pci_epf *epf)
+{
+	struct pci_epf_test *epf_test = epf_get_drvdata(epf);
+	int bar;
+
+	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+		if (epf_test->reg[bar]) {
+			pci_epf_free_space(epf, epf_test->reg[bar],
+					   bar, PRIMARY_INTERFACE);
+			epf_test->reg[bar] = NULL;
+		}
+	}
+}
+
 static void pci_epf_configure_bar(struct pci_epf *epf,
 				  const struct pci_epc_features *epc_features)
 {
@@ -903,6 +915,7 @@ static int pci_epf_test_bind(struct pci_epf *epf)
 	struct pci_epc *epc = epf->epc;
 	bool linkup_notifier = false;
 	bool core_init_notifier = false;
+	bool force_core_init = false;
 
 	if (WARN_ON_ONCE(!epc))
 		return -EINVAL;
@@ -915,6 +928,7 @@ static int pci_epf_test_bind(struct pci_epf *epf)
 
 	linkup_notifier = epc_features->linkup_notifier;
 	core_init_notifier = epc_features->core_init_notifier;
+	force_core_init = epc_features->force_core_init;
 	test_reg_bar = pci_epc_get_first_free_bar(epc_features);
 	if (test_reg_bar < 0)
 		return -EINVAL;
@@ -927,10 +941,12 @@ static int pci_epf_test_bind(struct pci_epf *epf)
 	if (ret)
 		return ret;
 
-	if (!core_init_notifier) {
+	if (!core_init_notifier || force_core_init) {
 		ret = pci_epf_test_core_init(epf);
-		if (ret)
+		if (ret) {
+			pci_epf_test_free_space(epf);
 			return ret;
+		}
 	}
 
 	epf_test->dma_supported = true;

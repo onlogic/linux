@@ -990,6 +990,7 @@ struct dwc3_scratchpad_array {
  * @bounce_addr: dma address of @bounce
  * @ep0_usb_req: dummy req used while handling STD USB requests
  * @ep0_in_setup: one control transfer is completed and enter setup phase
+ * @xhci_plat_data: private data for xhci callback
  * @lock: for synchronizing
  * @mutex: for mode switching
  * @dev: pointer to our struct device
@@ -1154,6 +1155,8 @@ struct dwc3 {
 	struct dwc3_request	ep0_usb_req;
 	struct completion	ep0_in_setup;
 
+	void			*xhci_plat_data;
+
 	/* device lock */
 	spinlock_t		lock;
 
@@ -1195,6 +1198,7 @@ struct dwc3 {
 	enum usb_dr_mode	dr_mode;
 	u32			current_dr_role;
 	u32			desired_dr_role;
+	int			submode;
 	struct extcon_dev	*edev;
 	struct notifier_block	edev_nb;
 	enum usb_phy_interface	hsphy_mode;
@@ -1532,7 +1536,9 @@ struct dwc3_gadget_ep_cmd_params {
 
 /* prototypes */
 void dwc3_set_prtcap(struct dwc3 *dwc, u32 mode);
-void dwc3_set_mode(struct dwc3 *dwc, u32 mode);
+#define dwc3_set_mode(dwc3, mode) \
+	dwc3_set_mode_ext(dwc3, mode, USB_ROLE_NONE)
+void dwc3_set_mode_ext(struct dwc3 *dwc, u32 mode, int submode);
 u32 dwc3_core_fifo_space(struct dwc3_ep *dep, u8 type);
 
 #define DWC3_IP_IS(_ip)							\

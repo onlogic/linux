@@ -50,15 +50,24 @@ static void dwc2_enable_common_interrupts(struct dwc2_hsotg *hsotg)
 	dwc2_writel(hsotg, 0xffffffff, GINTSTS);
 
 	/* Enable the interrupts in the GINTMSK */
-	intmsk = GINTSTS_MODEMIS | GINTSTS_OTGINT;
+	if (hsotg->hw_params.op_mode == GHWCFG2_OP_MODE_NO_HNP_SRP_CAPABLE ||
+	    hsotg->hw_params.op_mode == GHWCFG2_OP_MODE_NO_SRP_CAPABLE_DEVICE ||
+	    hsotg->hw_params.op_mode == GHWCFG2_OP_MODE_NO_SRP_CAPABLE_HOST)
+		intmsk = GINTSTS_MODEMIS;
+	else
+		intmsk = GINTSTS_MODEMIS | GINTSTS_OTGINT;
 
 	if (!hsotg->params.host_dma)
 		intmsk |= GINTSTS_RXFLVL;
 	if (!hsotg->params.external_id_pin_ctl)
 		intmsk |= GINTSTS_CONIDSTSCHNG;
-
-	intmsk |= GINTSTS_WKUPINT | GINTSTS_USBSUSP |
-		  GINTSTS_SESSREQINT;
+	if (hsotg->hw_params.op_mode == GHWCFG2_OP_MODE_NO_HNP_SRP_CAPABLE ||
+	    hsotg->hw_params.op_mode == GHWCFG2_OP_MODE_NO_SRP_CAPABLE_DEVICE ||
+	    hsotg->hw_params.op_mode == GHWCFG2_OP_MODE_NO_SRP_CAPABLE_HOST)
+		intmsk |= GINTSTS_WKUPINT | GINTSTS_USBSUSP;
+	else
+		intmsk |= GINTSTS_WKUPINT | GINTSTS_USBSUSP |
+			  GINTSTS_SESSREQINT;
 
 	if (dwc2_is_device_mode(hsotg) && hsotg->params.lpm)
 		intmsk |= GINTSTS_LPMTRANRCVD;
@@ -1701,7 +1710,8 @@ static void dwc2_hcd_cleanup_channels(struct dwc2_hsotg *hsotg)
 		 * release_channel_ddma(), which is called from ep_disable when
 		 * device disconnects
 		 */
-		channel->qh = NULL;
+		if (hsotg->params.host_dma && hsotg->params.dma_desc_enable)
+			channel->qh = NULL;
 	}
 	/* All channels have been freed, mark them available */
 	if (hsotg->params.uframe_sched) {
@@ -3618,11 +3628,14 @@ static int dwc2_hcd_hub_control(struct dwc2_hsotg *hsotg, u16 typereq,
 		if (wvalue != USB_PORT_FEAT_TEST && (!windex || windex > 1))
 			goto error;
 
-		if (dwc2_is_device_mode(hsotg)) {
+		if (!hsotg->flags.b.port_connect_status &&
+		    !dwc2_is_host_mode(hsotg)) {
 			/*
-			 * Just return 0's for the remainder of the port status
-			 * since the port register can't be read if the core
-			 * is in device mode.
+			 * The port is disconnected, which means the core is
+			 * either in device mode or it soon will be. Just
+			 * return without doing anything since the port
+			 * register can't be written if the core is in device
+			 * mode.
 			 */
 			break;
 		}
@@ -3718,6 +3731,7 @@ static int dwc2_hcd_hub_control(struct dwc2_hsotg *hsotg, u16 typereq,
 			hprt0 &= ~HPRT0_TSTCTL_MASK;
 			hprt0 |= (windex >> 8) << HPRT0_TSTCTL_SHIFT;
 			dwc2_writel(hsotg, hprt0, HPRT0);
+			hsotg->test_mode = windex >> 8;
 			break;
 
 		default:
@@ -4264,9 +4278,11 @@ static int _dwc2_hcd_start(struct usb_hcd *hcd)
 		return 0;	/* why 0 ?? */
 	}
 
+	hprt0 = dwc2_read_hprt0(hsotg);
+
 	dwc2_hcd_reinit(hsotg);
 
-	hprt0 = dwc2_read_hprt0(hsotg);
+	hprt0 ^= dwc2_read_hprt0(hsotg);
 	/* Has vbus power been turned on in dwc2_core_host_init ? */
 	if (hprt0 & HPRT0_PWR) {
 		/* Enable external vbus supply before resuming root hub */
@@ -4375,6 +4391,7 @@ static int _dwc2_hcd_suspend(struct usb_hcd *hcd)
 		 * clock gating is used to save power.
 		 */
 		if (!hsotg->params.no_clock_gating) {
+			dwc2_disable_global_interrupts(hsotg);
 			dwc2_host_enter_clock_gating(hsotg);
 
 			/* After entering suspend, hardware is not accessible */
@@ -4384,10 +4401,6 @@ static int _dwc2_hcd_suspend(struct usb_hcd *hcd)
 	default:
 		goto skip_power_saving;
 	}
-
-	spin_unlock_irqrestore(&hsotg->lock, flags);
-	dwc2_vbus_supply_exit(hsotg);
-	spin_lock_irqsave(&hsotg->lock, flags);
 
 	/* Ask phy to be suspended */
 	if (!IS_ERR_OR_NULL(hsotg->uphy)) {
@@ -4419,21 +4432,21 @@ static int _dwc2_hcd_resume(struct usb_hcd *hcd)
 	if (hsotg->lx_state != DWC2_L2)
 		goto unlock;
 
-	hprt0 = dwc2_read_hprt0(hsotg);
-
-	/*
-	 * Added port connection status checking which prevents exiting from
-	 * Partial Power Down mode from _dwc2_hcd_resume() if not in Partial
-	 * Power Down mode.
-	 */
-	if (hprt0 & HPRT0_CONNSTS) {
-		set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
-		hsotg->lx_state = DWC2_L0;
-		goto unlock;
-	}
-
 	switch (hsotg->params.power_down) {
 	case DWC2_POWER_DOWN_PARAM_PARTIAL:
+		hprt0 = dwc2_read_hprt0(hsotg);
+
+		/*
+		 * Added port connection status checking which prevents exiting from
+		 * Partial Power Down mode from _dwc2_hcd_resume() if not in Partial
+		 * Power Down mode.
+		 */
+		if (hprt0 & HPRT0_CONNSTS) {
+			set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+			hsotg->lx_state = DWC2_L0;
+			goto unlock;
+		}
+
 		ret = dwc2_exit_partial_power_down(hsotg, 0, true);
 		if (ret)
 			dev_err(hsotg->dev,
@@ -4468,7 +4481,6 @@ static int _dwc2_hcd_resume(struct usb_hcd *hcd)
 		 * the global interrupts are disabled.
 		 */
 		dwc2_core_init(hsotg, false);
-		dwc2_enable_global_interrupts(hsotg);
 		dwc2_hcd_reinit(hsotg);
 		spin_lock_irqsave(&hsotg->lock, flags);
 
@@ -4477,14 +4489,13 @@ static int _dwc2_hcd_resume(struct usb_hcd *hcd)
 		 * since an interrupt may rise.
 		 */
 		set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+		dwc2_enable_global_interrupts(hsotg);
+
 		break;
 	default:
 		hsotg->lx_state = DWC2_L0;
 		goto unlock;
 	}
-
-	/* Change Root port status, as port status change occurred after resume.*/
-	hsotg->flags.b.port_suspend_change = 1;
 
 	/*
 	 * Enable power if not already done.
@@ -4497,10 +4508,7 @@ static int _dwc2_hcd_resume(struct usb_hcd *hcd)
 		spin_lock_irqsave(&hsotg->lock, flags);
 	}
 
-	/* Enable external vbus supply after resuming the port. */
 	spin_unlock_irqrestore(&hsotg->lock, flags);
-	dwc2_vbus_supply_init(hsotg);
-
 	/* Wait for controller to correctly update D+/D- level */
 	usleep_range(3000, 5000);
 	spin_lock_irqsave(&hsotg->lock, flags);
@@ -5718,11 +5726,17 @@ int dwc2_host_exit_hibernation(struct dwc2_hsotg *hsotg, int rem_wakeup,
 
 bool dwc2_host_can_poweroff_phy(struct dwc2_hsotg *dwc2)
 {
-	struct usb_device *root_hub = dwc2_hsotg_to_hcd(dwc2)->self.root_hub;
+	struct usb_device *root_hub;
+
+	/* host driver don't need the PHY, as in device mode */
+	if (dwc2_is_device_mode(dwc2) || dwc2->dr_mode == USB_DR_MODE_PERIPHERAL)
+		return false;
 
 	/* If the controller isn't allowed to wakeup then we can power off. */
 	if (!device_may_wakeup(dwc2->dev))
 		return true;
+
+	root_hub = dwc2_hsotg_to_hcd(dwc2)->self.root_hub;
 
 	/*
 	 * We don't want to power off the PHY if something under the

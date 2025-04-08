@@ -18,10 +18,16 @@ properties:
               - st,stm32-power-config
               - st,stm32-syscfg
               - st,stm32-tamp
+              - st,stm32mp25-tamp
               - st,stm32f4-gcan
               - st,stm32mp151-pwr-mcu
               - st,stm32mp157-syscfg
               - st,stm32mp25-syscfg
+              - st,stm32mp25-pwr
+              - st,stm32mp21-syscfg
+              - st,stm32mp21-pwr
+
+              - st,stm32mp25-a35ssc-m33
           - const: syscon
       - items:
           - const: st,stm32-tamp
@@ -34,20 +40,45 @@ properties:
   clocks:
     maxItems: 1
 
+  '#address-cells':
+    const: 1
+
+  '#size-cells':
+    const: 1
+
+  ranges: true
+
+patternProperties:
+  "^nvram@[0-9a-f]+$":
+    type: object
+    $ref: /schemas/nvmem/st,stm32-tamp-nvram.yaml#
+
 required:
   - compatible
   - reg
 
-if:
-  properties:
-    compatible:
-      contains:
-        enum:
-          - st,stm32mp157-syscfg
-          - st,stm32f4-gcan
-then:
-  required:
-    - clocks
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - st,stm32mp157-syscfg
+              - st,stm32f4-gcan
+    then:
+      required:
+        - clocks
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - st,stm32-tamp
+    then:
+      required:
+        - '#address-cells'
+        - '#size-cells'
+        - ranges
 
 additionalProperties: false
 

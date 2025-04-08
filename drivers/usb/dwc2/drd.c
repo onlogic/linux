@@ -17,10 +17,62 @@
 	((gotgctl) |= GOTGCTL_BVALOEN | GOTGCTL_AVALOEN | GOTGCTL_VBVALOEN | \
 	 GOTGCTL_DBNCE_FLTR_BYPASS)
 
+static void dwc2_ovr_init_stm32mp21(struct dwc2_hsotg *hsotg)
+{
+	unsigned long flags;
+	u32 ggpio;
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+
+	ggpio = dwc2_readl(hsotg, GGPIO);
+	if (hsotg->role_sw_default_mode == USB_DR_MODE_HOST) {
+		ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		ggpio &= ~GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+	} else if (hsotg->role_sw_default_mode == USB_DR_MODE_PERIPHERAL) {
+		ggpio |= GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+		ggpio |= GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+	} else {
+		ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		ggpio |= GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+	}
+	dwc2_writel(hsotg, ggpio, GGPIO);
+
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+
+	dwc2_force_mode(hsotg, (hsotg->dr_mode == USB_DR_MODE_HOST) ||
+			(hsotg->role_sw_default_mode == USB_DR_MODE_HOST));
+}
+
+static void dwc2_ovr_avalid_stm32mp21(struct dwc2_hsotg *hsotg, bool valid)
+{
+	u32 ggpio;
+
+	ggpio = dwc2_readl(hsotg, GGPIO);
+	ggpio &= ~GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+	ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+	dwc2_writel(hsotg, ggpio, GGPIO);
+}
+
+static void dwc2_ovr_bvalid_stm32mp21(struct dwc2_hsotg *hsotg, bool valid)
+{
+	u32 ggpio;
+
+	ggpio = dwc2_readl(hsotg, GGPIO);
+	ggpio |= GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+	if (!valid)
+		ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+	else
+		ggpio |= GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+	dwc2_writel(hsotg, ggpio, GGPIO);
+}
+
 static void dwc2_ovr_init(struct dwc2_hsotg *hsotg)
 {
 	unsigned long flags;
 	u32 gotgctl;
+
+	if (hsotg->params.activate_stm32_bvaloval_en)
+		dwc2_ovr_init_stm32mp21(hsotg);
 
 	spin_lock_irqsave(&hsotg->lock, flags);
 
@@ -43,9 +95,12 @@ static int dwc2_ovr_avalid(struct dwc2_hsotg *hsotg, bool valid)
 {
 	u32 gotgctl = dwc2_readl(hsotg, GOTGCTL);
 
+	if (hsotg->params.activate_stm32_bvaloval_en)
+		dwc2_ovr_avalid_stm32mp21(hsotg, valid);
+
 	/* Check if A-Session is already in the right state */
-	if ((valid && (gotgctl & GOTGCTL_ASESVLD)) ||
-	    (!valid && !(gotgctl & GOTGCTL_ASESVLD)))
+	if ((valid && (gotgctl & GOTGCTL_AVALOVAL) && (gotgctl & GOTGCTL_VBVALOVAL)) ||
+	    (!valid && !(gotgctl & (GOTGCTL_AVALOVAL | GOTGCTL_VBVALOVAL))))
 		return -EALREADY;
 
 	/* Always enable overrides to handle the resume case */
@@ -65,9 +120,12 @@ static int dwc2_ovr_bvalid(struct dwc2_hsotg *hsotg, bool valid)
 {
 	u32 gotgctl = dwc2_readl(hsotg, GOTGCTL);
 
+	if (hsotg->params.activate_stm32_bvaloval_en)
+		dwc2_ovr_bvalid_stm32mp21(hsotg, valid);
+
 	/* Check if B-Session is already in the right state */
-	if ((valid && (gotgctl & GOTGCTL_BSESVLD)) ||
-	    (!valid && !(gotgctl & GOTGCTL_BSESVLD)))
+	if ((valid && (gotgctl & GOTGCTL_BVALOVAL) && (gotgctl & GOTGCTL_VBVALOVAL)) ||
+	    (!valid && !(gotgctl & (GOTGCTL_BVALOVAL | GOTGCTL_VBVALOVAL))))
 		return -EALREADY;
 
 	/* Always enable overrides to handle the resume case */
@@ -130,11 +188,14 @@ static int dwc2_drd_role_sw_set(struct usb_role_switch *sw, enum usb_role role)
 	if ((IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) ||
 	     IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)) &&
 	     dwc2_is_device_mode(hsotg) &&
-	     hsotg->lx_state == DWC2_L2 &&
-	     hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
-	     hsotg->bus_suspended &&
-	     !hsotg->params.no_clock_gating)
-		dwc2_gadget_exit_clock_gating(hsotg, 0);
+	     hsotg->lx_state == DWC2_L2) {
+		if (hsotg->in_ppd)
+			dwc2_gadget_exit_partial_power_down(hsotg, 0, true);
+
+		if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
+		    !hsotg->params.no_clock_gating)
+			dwc2_gadget_exit_clock_gating(hsotg, 0);
+	}
 
 	if (role == USB_ROLE_HOST) {
 		already = dwc2_ovr_avalid(hsotg, true);

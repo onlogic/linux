@@ -464,6 +464,7 @@ static int panel_dpi_probe(struct device *dev,
 	struct panel_desc *desc;
 	unsigned int bus_flags;
 	struct videomode vm;
+	const char *mapping;
 	int ret;
 
 	np = dev->of_node;
@@ -487,6 +488,30 @@ static int panel_dpi_probe(struct device *dev,
 
 	of_property_read_u32(np, "width-mm", &desc->size.width);
 	of_property_read_u32(np, "height-mm", &desc->size.height);
+
+	of_property_read_string(np, "data-mapping", &mapping);
+
+	if (mapping) {
+		if (!strcmp(mapping, "rgb24")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+			desc->bpc = 8;
+		} else if (!strcmp(mapping, "rgb565")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB565_1X16;
+			desc->bpc = 6;
+		} else if (!strcmp(mapping, "bgr666")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB666_1X18;
+			desc->bpc = 6;
+		} else if (!strcmp(mapping, "lvds666")) {
+			desc->bus_format = MEDIA_BUS_FMT_RGB666_1X24_CPADHI;
+			desc->bpc = 6;
+		}
+	} else {
+		/* No data-mapping node found, set by default bus format & bpc */
+		dev_warn(dev, "%pOF: no data-mapping node found for \"panel-dpi\" binding\n",
+			np);
+		desc->bus_format = MEDIA_BUS_FMT_RGB888_1X24;
+		desc->bpc = 8;
+	}
 
 	/* Extract bus_flags from display_timing */
 	bus_flags = 0;
@@ -569,8 +594,11 @@ static int panel_simple_probe(struct device *dev, const struct panel_desc *desc)
 	if (IS_ERR(panel->supply))
 		return PTR_ERR(panel->supply);
 
-	panel->enable_gpio = devm_gpiod_get_optional(dev, "enable",
-						     GPIOD_OUT_LOW);
+	if (device_property_read_bool(dev, "default-on"))
+		panel->enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_HIGH);
+	else
+		panel->enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_LOW);
+
 	if (IS_ERR(panel->enable_gpio))
 		return dev_err_probe(dev, PTR_ERR(panel->enable_gpio),
 				     "failed to request GPIO\n");
@@ -668,6 +696,14 @@ static int panel_simple_probe(struct device *dev, const struct panel_desc *desc)
 	pm_runtime_use_autosuspend(dev);
 
 	drm_panel_init(&panel->base, dev, &panel_simple_funcs, connector_type);
+
+	if (device_property_read_bool(dev, "default-on")) {
+		err = pm_runtime_get_sync(dev);
+		if (err < 0)
+			goto disable_pm_runtime;
+
+		panel->prepared = true;
+	}
 
 	err = drm_panel_of_backlight(&panel->base);
 	if (err) {

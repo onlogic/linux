@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 
 #include <video/mipi_display.h>
@@ -109,13 +110,16 @@ static inline struct otm8009a *panel_to_otm8009a(struct drm_panel *panel)
 	return container_of(panel, struct otm8009a, panel);
 }
 
-static void otm8009a_dcs_write_buf(struct otm8009a *ctx, const void *data,
-				   size_t len)
+static int otm8009a_dcs_write_buf(struct otm8009a *ctx, const void *data, size_t len)
 {
 	struct mipi_dsi_device *dsi = to_mipi_dsi_device(ctx->dev);
+	int ret = 0;
 
-	if (mipi_dsi_dcs_write_buffer(dsi, data, len) < 0)
+	ret = mipi_dsi_dcs_write_buffer(dsi, data, len);
+	if (ret < 0)
 		dev_warn(ctx->dev, "mipi dsi dcs write buffer failed\n");
+
+	return ret;
 }
 
 #define dcs_write_seq(ctx, seq...)			\
@@ -290,16 +294,15 @@ static int otm8009a_disable(struct drm_panel *panel)
 static int otm8009a_unprepare(struct drm_panel *panel)
 {
 	struct otm8009a *ctx = panel_to_otm8009a(panel);
+	int ret;
 
 	if (!ctx->prepared)
 		return 0;
 
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-	}
-
-	regulator_disable(ctx->supply);
+	pm_runtime_mark_last_busy(panel->dev);
+	ret = pm_runtime_put_autosuspend(panel->dev);
+	if (ret < 0)
+		return ret;
 
 	ctx->prepared = false;
 
@@ -314,18 +317,10 @@ static int otm8009a_prepare(struct drm_panel *panel)
 	if (ctx->prepared)
 		return 0;
 
-	ret = regulator_enable(ctx->supply);
+	ret = pm_runtime_get_sync(panel->dev);
 	if (ret < 0) {
-		dev_err(panel->dev, "failed to enable supply: %d\n", ret);
+		pm_runtime_put_autosuspend(panel->dev);
 		return ret;
-	}
-
-	if (ctx->reset_gpio) {
-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		msleep(20);
-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
-		msleep(100);
 	}
 
 	ret = otm8009a_init_sequence(ctx);
@@ -380,6 +375,8 @@ static int otm8009a_get_modes(struct drm_panel *panel,
 
 	connector->display_info.width_mm = mode->width_mm;
 	connector->display_info.height_mm = mode->height_mm;
+	connector->display_info.bus_flags = DRM_BUS_FLAG_DE_HIGH |
+					    DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE;
 
 	return num_modes;
 }
@@ -400,10 +397,11 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 {
 	struct otm8009a *ctx = bl_get_data(bd);
 	u8 data[2];
+	int ret = 0;
 
 	if (!ctx->prepared) {
 		dev_dbg(&bd->dev, "lcd not ready yet for setting its backlight!\n");
-		return -ENXIO;
+		return ret;
 	}
 
 	if (bd->props.power <= FB_BLANK_NORMAL) {
@@ -413,7 +411,9 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 		 */
 		data[0] = MIPI_DCS_SET_DISPLAY_BRIGHTNESS;
 		data[1] = bd->props.brightness;
-		otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+		ret = otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+		if (ret < 0)
+			return ret;
 
 		/* set Brightness Control & Backlight on */
 		data[1] = 0x24;
@@ -425,7 +425,9 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 
 	/* Update Brightness Control & Backlight */
 	data[0] = MIPI_DCS_WRITE_CONTROL_DISPLAY;
-	otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+	ret = otm8009a_dcs_write_buf(ctx, data, ARRAY_SIZE(data));
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -444,19 +446,19 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(ctx->reset_gpio)) {
-		dev_err(dev, "cannot get reset-gpio\n");
-		return PTR_ERR(ctx->reset_gpio);
-	}
+	if (device_property_read_bool(dev, "default-on"))
+		ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
+	else
+		ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+
+	if (IS_ERR(ctx->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+				     "cannot get reset GPIO\n");
 
 	ctx->supply = devm_regulator_get(dev, "power");
-	if (IS_ERR(ctx->supply)) {
-		ret = PTR_ERR(ctx->supply);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to request regulator: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(ctx->supply))
+		return dev_err_probe(dev, PTR_ERR(ctx->supply),
+				     "cannot get regulator\n");
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 
@@ -465,7 +467,12 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	dsi->lanes = 2;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS;
+			  MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS |
+			  MIPI_DSI_MODE_NO_EOT_PACKET;
+
+	pm_runtime_enable(ctx->dev);
+	pm_runtime_set_autosuspend_delay(ctx->dev, 1000);
+	pm_runtime_use_autosuspend(ctx->dev);
 
 	drm_panel_init(&ctx->panel, dev, &otm8009a_drm_funcs,
 		       DRM_MODE_CONNECTOR_DSI);
@@ -477,7 +484,7 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	if (IS_ERR(ctx->bl_dev)) {
 		ret = PTR_ERR(ctx->bl_dev);
 		dev_err(dev, "failed to register backlight: %d\n", ret);
-		return ret;
+		goto disable_pm_runtime;
 	}
 
 	ctx->bl_dev->props.max_brightness = OTM8009A_BACKLIGHT_MAX;
@@ -491,10 +498,16 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0) {
 		dev_err(dev, "mipi_dsi_attach failed. Is host ready?\n");
 		drm_panel_remove(&ctx->panel);
-		return ret;
+		goto disable_pm_runtime;
 	}
 
 	return 0;
+
+disable_pm_runtime:
+	pm_runtime_dont_use_autosuspend(dev);
+	pm_runtime_disable(dev);
+
+	return ret;
 }
 
 static void otm8009a_remove(struct mipi_dsi_device *dsi)
@@ -503,7 +516,45 @@ static void otm8009a_remove(struct mipi_dsi_device *dsi)
 
 	mipi_dsi_detach(dsi);
 	drm_panel_remove(&ctx->panel);
+
+	pm_runtime_dont_use_autosuspend(ctx->dev);
+	pm_runtime_disable(ctx->dev);
 }
+
+static __maybe_unused int orisetech_otm8009a_suspend(struct device *dev)
+{
+	struct otm8009a *ctx = dev_get_drvdata(dev);
+
+	regulator_disable(ctx->supply);
+
+	return 0;
+}
+
+static __maybe_unused int orisetech_otm8009a_resume(struct device *dev)
+{
+	struct otm8009a *ctx = dev_get_drvdata(dev);
+	int ret;
+
+	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	msleep(20);
+
+	ret = regulator_enable(ctx->supply);
+	if (ret < 0) {
+		dev_err(ctx->dev, "failed to enable supply: %d\n", ret);
+		return ret;
+	}
+
+	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+	msleep(100);
+
+	return 0;
+}
+
+static const struct dev_pm_ops orisetech_otm8009a_pm_ops = {
+	SET_RUNTIME_PM_OPS(orisetech_otm8009a_suspend, orisetech_otm8009a_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
+};
 
 static const struct of_device_id orisetech_otm8009a_of_match[] = {
 	{ .compatible = "orisetech,otm8009a" },
@@ -517,6 +568,7 @@ static struct mipi_dsi_driver orisetech_otm8009a_driver = {
 	.driver = {
 		.name = "panel-orisetech-otm8009a",
 		.of_match_table = orisetech_otm8009a_of_match,
+		.pm = &orisetech_otm8009a_pm_ops,
 	},
 };
 module_mipi_dsi_driver(orisetech_otm8009a_driver);

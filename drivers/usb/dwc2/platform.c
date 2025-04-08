@@ -12,10 +12,12 @@
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
+#include <linux/mfd/syscon.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_data/s3c-hsotg.h>
+#include <linux/regmap.h>
 #include <linux/reset.h>
 
 #include <linux/usb/of.h>
@@ -25,6 +27,188 @@
 #include "debug.h"
 
 static const char dwc2_driver_name[] = "dwc2";
+
+#define TDCD_DBNC		100
+
+#define VBUS_CURRENT_500MA	500
+#define VBUS_CURRENT_1500MA	1500
+#define VBUS_CURRENT_MAX	1500
+
+static enum power_supply_property usb_chg_props[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_CURRENT_MAX,
+};
+
+static enum power_supply_usb_type usb_chg_psy_types[] = {
+	POWER_SUPPLY_USB_TYPE_SDP,	      /* Standard Downstream Port */
+	POWER_SUPPLY_USB_TYPE_DCP,	      /* Dedicated Charging Port */
+	POWER_SUPPLY_USB_TYPE_CDP,	      /* Charging Downstream Port */
+};
+
+static int stm32mp2_usb2phy_batt_chg_get_property(struct power_supply *psy,
+						  enum power_supply_property psp,
+						  union power_supply_propval *val)
+{
+	struct dwc2_hsotg *hsotg = power_supply_get_drvdata(psy);
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_ONLINE:
+		val->intval = 1;
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		val->intval = hsotg->chg_current * 1000;
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_MAX:
+		val->intval = VBUS_CURRENT_MAX * 1000;  /* Convert to uA */;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int stm32mp2_usb2phy_data_contact_det(struct dwc2_hsotg *hsotg)
+{
+	u32 reg_val;
+	int retval = 0;
+
+	/* Data contact det */
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	reg_val |= GGPIO_STM32_OTG_GCCFG_DCDEN;
+	dwc2_writel(hsotg, reg_val, GGPIO);
+
+	/* Wait for debounce time */
+	msleep(TDCD_DBNC);
+
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	if (!(reg_val & GGPIO_STM32_OTG_GCCFG_FSVPLUS))
+		retval = 0;
+	else
+		retval = -EAGAIN;
+
+	/* reset DCDEN */
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	reg_val &= ~GGPIO_STM32_OTG_GCCFG_DCDEN;
+	dwc2_writel(hsotg, reg_val, GGPIO);
+
+	return retval;
+}
+
+static int stm32mp2_usb2phy_primary_det(struct dwc2_hsotg *hsotg)
+{
+	u32 reg_val;
+	int retval = 0;
+
+	/* Primary det */
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	reg_val |= GGPIO_STM32_OTG_GCCFG_PDEN;
+	dwc2_writel(hsotg, reg_val, GGPIO);
+
+	msleep(20);
+
+	/* Check CHGDET bit */
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	if (reg_val & GGPIO_STM32_OTG_GCCFG_CHGDET) {
+		/* Device is connected to CDP or DCP */
+		retval = 1;
+	} else {
+		/* Device is connected to SDP */
+		dev_info(hsotg->dev, "Device connected to SDP\n");
+		hsotg->batt_chg_psy_type = POWER_SUPPLY_TYPE_USB;
+		hsotg->chg_current = VBUS_CURRENT_500MA;
+		retval = 0;
+	}
+
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	reg_val &= ~GGPIO_STM32_OTG_GCCFG_PDEN;
+	dwc2_writel(hsotg, reg_val, GGPIO);
+
+	return retval;
+}
+
+static void stm32mp2_usb2phy_secondary_det(struct dwc2_hsotg *hsotg)
+{
+	u32 reg_val;
+
+	/* Secondary det */
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	reg_val |= GGPIO_STM32_OTG_GCCFG_SDEN;
+	dwc2_writel(hsotg, reg_val, GGPIO);
+
+	msleep(20);
+
+	/* Check CHGDET bit */
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	if (reg_val & GGPIO_STM32_OTG_GCCFG_CHGDET) {
+		/* Device is connected to DCP */
+		dev_info(hsotg->dev, "Device connected to DCP\n");
+		hsotg->batt_chg_psy_type = POWER_SUPPLY_TYPE_USB_DCP;
+		hsotg->chg_current = VBUS_CURRENT_1500MA;
+	} else {
+		/* Device is connected to CDP */
+		dev_info(hsotg->dev, "Device connected to CDP\n");
+		hsotg->batt_chg_psy_type = POWER_SUPPLY_TYPE_USB_CDP;
+		hsotg->chg_current = VBUS_CURRENT_1500MA;
+	}
+
+	reg_val = dwc2_readl(hsotg, GGPIO);
+	reg_val &= ~GGPIO_STM32_OTG_GCCFG_SDEN;
+	dwc2_writel(hsotg, reg_val, GGPIO);
+}
+
+int stm32mp2_usb2phy_usb_chg_psy_register(struct dwc2_hsotg *hsotg)
+{
+	struct power_supply_desc *psy_desc = &hsotg->batt_chg_psy_desc;
+	struct power_supply_config usb_chg_psy_cfg = {};
+	char *psy_name;
+
+	psy_name = devm_kasprintf(hsotg->dev, GFP_KERNEL, "psy-%s",
+				  dev_name(hsotg->dev));
+	if (!psy_name)
+		return -ENOMEM;
+
+	psy_desc->name = psy_name;
+	psy_desc->type = POWER_SUPPLY_TYPE_USB;
+	psy_desc->usb_types = usb_chg_psy_types;
+	psy_desc->num_usb_types = ARRAY_SIZE(usb_chg_psy_types);
+	psy_desc->properties = usb_chg_props;
+	psy_desc->num_properties = ARRAY_SIZE(usb_chg_props);
+	psy_desc->get_property = stm32mp2_usb2phy_batt_chg_get_property;
+
+	hsotg->batt_chg_psy_type = POWER_SUPPLY_TYPE_USB;
+
+	usb_chg_psy_cfg.drv_data = hsotg;
+	hsotg->chg_current = VBUS_CURRENT_500MA; /* Default current */
+	hsotg->psy_batt_chg = devm_power_supply_register(hsotg->dev, psy_desc,
+							 &usb_chg_psy_cfg);
+
+	if (IS_ERR(hsotg->psy_batt_chg)) {
+		dev_warn(hsotg->dev, "unable to register power supply\n");
+		return PTR_ERR(hsotg->psy_batt_chg);
+	}
+
+	return 0;
+}
+
+int stm32mp2_usb2phy_batt_chg_det(struct dwc2_hsotg *hsotg)
+{
+	int ret;
+
+	ret = stm32mp2_usb2phy_data_contact_det(hsotg);
+	if (ret)
+		return ret;
+
+	ret = stm32mp2_usb2phy_primary_det(hsotg);
+	if (ret)
+		stm32mp2_usb2phy_secondary_det(hsotg);
+
+	if (hsotg->chg_current != VBUS_CURRENT_500MA)
+		power_supply_changed(hsotg->psy_batt_chg);
+
+	return 0;
+}
 
 /*
  * Check the dr_mode against the module configuration and hardware
@@ -349,6 +533,14 @@ static void dwc2_driver_remove(struct platform_device *dev)
 	if (hsotg->params.activate_stm_id_vb_detection)
 		regulator_disable(hsotg->usb33d);
 
+	if (hsotg->params.activate_stm32_bvaloval_en && !hsotg->role_sw) {
+		u32 ggpio = dwc2_readl(hsotg, GGPIO);
+
+		ggpio &= ~GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+		ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		dwc2_writel(hsotg, ggpio, GGPIO);
+	}
+
 	if (hsotg->ll_hw_enabled)
 		dwc2_lowlevel_hw_disable(hsotg);
 }
@@ -369,8 +561,18 @@ static void dwc2_driver_shutdown(struct platform_device *dev)
 {
 	struct dwc2_hsotg *hsotg = platform_get_drvdata(dev);
 
+	/*
+	 * The low level HW may have been left disabled from the probe,
+	 * or disabled later on, enable it before turning off interrupts
+	 */
+	if (!hsotg->ll_hw_enabled)
+		__dwc2_lowlevel_hw_enable(hsotg);
+
 	dwc2_disable_global_interrupts(hsotg);
 	synchronize_irq(hsotg->irq);
+
+	if (!hsotg->ll_hw_enabled)
+		__dwc2_lowlevel_hw_disable(hsotg);
 }
 
 /**
@@ -435,6 +637,7 @@ int dwc2_check_core_version(struct dwc2_hsotg *hsotg)
  */
 static int dwc2_driver_probe(struct platform_device *dev)
 {
+	struct device_node *node = dev->dev.of_node;
 	struct dwc2_hsotg *hsotg;
 	struct resource *res;
 	int retval;
@@ -537,6 +740,30 @@ static int dwc2_driver_probe(struct platform_device *dev)
 	if (retval)
 		goto error;
 
+	if (hsotg->params.activate_stm32_otgarcr_en) {
+		hsotg->params.stm32_regmap = syscon_regmap_lookup_by_phandle(node, "st,syscfg");
+		if (IS_ERR(hsotg->params.stm32_regmap)) {
+			retval = dev_err_probe(&dev->dev, PTR_ERR(hsotg->params.stm32_regmap),
+					       "no st,syscfg node found\n");
+			goto error;
+		}
+
+		retval = of_property_read_u32_index(node, "st,syscfg", 1,
+						    &hsotg->params.stm32_syscfg_otgarcr_reg_off);
+		if (retval) {
+			retval = dev_err_probe(&dev->dev, retval, "can't get otgarcr offset\n");
+			goto error;
+		}
+		dev_vdbg(&dev->dev, "syscfg-otgarcr-reg offset 0x%x\n",
+			 hsotg->params.stm32_syscfg_otgarcr_reg_off);
+	}
+
+	if (dev->dev.dma_range_map && hsotg->params.activate_stm32_otgarcr_en) {
+		regmap_set_bits(hsotg->params.stm32_regmap,
+				hsotg->params.stm32_syscfg_otgarcr_reg_off,
+				STM32_SYSCFG_OTGARCR_OFFSET_AREN_MASK);
+	}
+
 	if (hsotg->params.activate_stm_id_vb_detection) {
 		u32 ggpio;
 
@@ -561,10 +788,24 @@ static int dwc2_driver_probe(struct platform_device *dev)
 		usleep_range(5000, 7000);
 	}
 
+
 	retval = dwc2_drd_init(hsotg);
 	if (retval) {
 		dev_err_probe(hsotg->dev, retval, "failed to initialize dual-role\n");
 		goto error_init;
+	}
+
+	if (hsotg->params.activate_stm32_bvaloval_en && !hsotg->role_sw) {
+		u32 ggpio = dwc2_readl(hsotg, GGPIO);
+
+		if (hsotg->dr_mode == USB_DR_MODE_HOST) {
+			ggpio &= ~GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+			ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		} else if (hsotg->dr_mode == USB_DR_MODE_PERIPHERAL) {
+			ggpio |= GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+			ggpio |= GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		}
+		dwc2_writel(hsotg, ggpio, GGPIO);
 	}
 
 	if (hsotg->dr_mode != USB_DR_MODE_HOST) {
@@ -572,6 +813,12 @@ static int dwc2_driver_probe(struct platform_device *dev)
 		if (retval)
 			goto error_drd;
 		hsotg->gadget_enabled = 1;
+	}
+
+	if (hsotg->params.stm32_has_batt_chg_det && hsotg->dr_mode != USB_DR_MODE_HOST) {
+		retval = stm32mp2_usb2phy_usb_chg_psy_register(hsotg);
+		if (retval)
+			goto error_drd;
 	}
 
 	/*
@@ -646,11 +893,49 @@ error:
 static int __maybe_unused dwc2_suspend(struct device *dev)
 {
 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
-	bool is_device_mode = dwc2_is_device_mode(dwc2);
+	bool is_device_mode;
+	bool ll_hw_enabled = dwc2->ll_hw_enabled;
 	int ret = 0;
 
-	if (is_device_mode)
+	/*
+	 * The low level HW may have been left disabled from the probe,
+	 * or disabled later on (e.g. gadget driver removed. Need to re-enable
+	 * temporarily, to properly manage the suspend.
+	 */
+	if (!ll_hw_enabled) {
+		ret = __dwc2_lowlevel_hw_enable(dwc2);
+		if (ret)
+			return ret;
+	}
+
+	is_device_mode = dwc2_is_device_mode(dwc2);
+
+	if (is_device_mode) {
+		/*
+		 * Handle the case when bus has been suspended prior to platform suspend.
+		 * - When the lx_state is DWC2_L2, the HOST has suspended the bus. So the
+		 * device shouldn't disconnect: dwc2_hsotg_suspend() is then a no-op. It
+		 * could request to resume the bus, or the HOST may request a bus resume.
+		 * Still user could disable wakeup trough sysfs, so check also if it can
+		 * be powered OFF.
+		 * - In case the device has been disconnected, then it should be properly
+		 * suspended/disconnected. Then, temporarily exit the low power mode (clock
+		 * gating, ppd), so the gadget can be suspended and resumed later on.
+		 */
+		if (!dwc2_is_device_connected(dwc2) || dwc2_gadget_can_poweroff_phy(dwc2)) {
+			if (dwc2->in_ppd) {
+				ret = dwc2_exit_partial_power_down(dwc2, 0, true);
+				if (ret)
+					dev_err(dwc2->dev, "exit power_down failed\n");
+			}
+
+			if (dwc2->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
+			    dwc2->bus_suspended && !dwc2->params.no_clock_gating)
+				dwc2_gadget_exit_clock_gating(dwc2, 0);
+		}
+
 		dwc2_hsotg_suspend(dwc2);
+	}
 
 	dwc2_drd_suspend(dwc2);
 
@@ -685,11 +970,18 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 		regulator_disable(dwc2->usb33d);
 	}
 
+	/* balance temporarily re-enabled HW */
+	if (!ll_hw_enabled)
+		ret = __dwc2_lowlevel_hw_disable(dwc2);
+
 	if (dwc2->ll_hw_enabled &&
-	    (is_device_mode || dwc2_host_can_poweroff_phy(dwc2))) {
+	    (dwc2_gadget_can_poweroff_phy(dwc2) || dwc2_host_can_poweroff_phy(dwc2))) {
 		ret = __dwc2_lowlevel_hw_disable(dwc2);
 		dwc2->phy_off_for_suspend = true;
 	}
+
+	if (device_may_wakeup(dev) || device_wakeup_path(dev))
+		enable_irq_wake(dwc2->irq);
 
 	return ret;
 }
@@ -697,7 +989,23 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 static int __maybe_unused dwc2_resume(struct device *dev)
 {
 	struct dwc2_hsotg *dwc2 = dev_get_drvdata(dev);
+	bool ll_hw_enabled = dwc2->ll_hw_enabled;
 	int ret = 0;
+
+	if (device_may_wakeup(dev) || device_wakeup_path(dev))
+		disable_irq_wake(dwc2->irq);
+
+	if (!ll_hw_enabled) {
+		ret = __dwc2_lowlevel_hw_enable(dwc2);
+		if (ret)
+			return ret;
+	}
+
+	if (dev->dma_range_map && dwc2->params.activate_stm32_otgarcr_en) {
+		regmap_set_bits(dwc2->params.stm32_regmap,
+				dwc2->params.stm32_syscfg_otgarcr_reg_off,
+				STM32_SYSCFG_OTGARCR_OFFSET_AREN_MASK);
+	}
 
 	if (dwc2->phy_off_for_suspend && dwc2->ll_hw_enabled) {
 		ret = __dwc2_lowlevel_hw_enable(dwc2);
@@ -731,6 +1039,19 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 		spin_unlock_irqrestore(&dwc2->lock, flags);
 	}
 
+	if (dwc2->params.activate_stm32_bvaloval_en && !dwc2->role_sw) {
+		u32 ggpio = dwc2_readl(dwc2, GGPIO);
+
+		if (dwc2->dr_mode == USB_DR_MODE_HOST) {
+			ggpio &= ~GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+			ggpio &= ~GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		} else if (dwc2->dr_mode == USB_DR_MODE_PERIPHERAL) {
+			ggpio |= GGPIO_STM32_OTG_GCCFG_IDPULLUP_DIS;
+			ggpio |= GGPIO_STM32_OTG_GCCFG_VBVALOVAL;
+		}
+		dwc2_writel(dwc2, ggpio, GGPIO);
+	}
+
 	if (!dwc2->role_sw) {
 		/* Need to restore FORCEDEVMODE/FORCEHOSTMODE */
 		dwc2_force_dr_mode(dwc2);
@@ -740,6 +1061,10 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 
 	if (dwc2_is_device_mode(dwc2))
 		ret = dwc2_hsotg_resume(dwc2);
+
+	/* balance temporarily re-enabled HW */
+	if (!ll_hw_enabled)
+		ret = __dwc2_lowlevel_hw_disable(dwc2);
 
 	return ret;
 }

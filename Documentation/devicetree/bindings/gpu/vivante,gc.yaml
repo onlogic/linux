@@ -47,6 +47,9 @@ properties:
     maxItems: 1
 
   power-domains:
+    maxItems: 2
+
+  contiguous-area:
     maxItems: 1
 
 required:
