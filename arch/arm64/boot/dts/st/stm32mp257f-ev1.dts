@@ -91,12 +91,16 @@
 	gpio-leds {
 		compatible = "gpio-leds";
 
-		led-blue {
-			function = LED_FUNCTION_HEARTBEAT;
-			color = <LED_COLOR_ID_BLUE>;
-			gpios = <&gpioj 7 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "heartbeat";
-			default-state = "off";
+		fault {
+			gpios = <&gpioj 7 GPIO_ACTIVE_HIGH>; /*blue*/
+		};
+
+		identify {
+			gpios = <&gpioj 6 GPIO_ACTIVE_HIGH>; /*orange*/
+		};
+
+		power {
+			gpios = <&gpiod 8 GPIO_ACTIVE_HIGH>; /*green*/
 		};
 	};
 
