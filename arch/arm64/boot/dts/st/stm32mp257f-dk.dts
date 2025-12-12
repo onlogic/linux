@@ -25,6 +25,8 @@
 		serial1 = &usart6;
 		serial2 = &usart1;
 		ethernet0 = &eth1;
+		mmc0 = &sdmmc2;
+		mmc1 = &sdmmc1;
 	};
 
 	chosen {
