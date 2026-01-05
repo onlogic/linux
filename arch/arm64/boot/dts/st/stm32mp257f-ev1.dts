@@ -365,6 +365,11 @@
 	/* spare dmas for other usage */
 	/delete-property/dmas;
 	/delete-property/dma-names;
+	
+	ssif-bmc@10 {
+		compatible = "ssif-bmc";
+		reg = <0x20>;
+	};
 
 	imx335: camera@1a {
 		compatible = "sony,imx335";
@@ -453,10 +458,7 @@
 	i2c-scl-rising-time-ns = <57>;
 	i2c-scl-falling-time-ns = <7>;
 	clock-frequency = <400000>;
-	status = "disabled";
-	/* spare dmas for other usage */
-	/delete-property/dmas;
-	/delete-property/dma-names;
+	status = "okay";
 };
 
 &i2s2 {
@@ -780,8 +782,7 @@
 	pinctrl-0 = <&usart6_pins_a>;
 	pinctrl-1 = <&usart6_idle_pins_a>;
 	pinctrl-2 = <&usart6_sleep_pins_a>;
-	uart-has-rtscts;
-	status = "disabled";
+	status = "okay";
 };
 
 &usb2_phy1 {
