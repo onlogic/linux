@@ -48,12 +48,13 @@
 		};
 	};
 
-	aliases {
+	aliases{
 		serial0 = &uart5;
 		mmc0 = &sdmmc1;
+ 		ethernet0 = &eth1;
 	};
 
-	chosen {
+	chosen{
 		stdout-path = "serial0:115200n8";
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -394,6 +395,25 @@
 	status = "okay";
 
 	/* USER CODE BEGIN eth1 */
+	phy-mode = "rgmii-id";
+	tx-delay-ns = <2>;
+	max-speed = <1000>;
+	phy-handle = <&phy1_eth2>;
+	st,eth-ptp-from-rcc;
+
+	mdio1{
+		#address-cells = <1>;
+		#size-cells = <0>;
+		compatible = "snps,dwmac-mdio";
+
+		phy1_eth2:ethernet-phy@1{
+			compatible = "ethernet-phy-id001c.c916";
+			reset-assert-us = <10000>;
+			reset-deassert-us = <80000>;
+			realtek,eee-disable;
+			reg = <1>;
+		};
+	};
 	/* USER CODE END eth1 */
 };
 
@@ -522,7 +542,6 @@
 	no-sdio;
 	st,neg-edge;
 	bus-width = <8>;
-
 	vmmc-supply = <&scmi_v3v3>;
 	vqmmc-supply = <&scmi_vddio1>;
 	mmc-ddr-1_8v;
@@ -589,6 +608,11 @@
 	status = "okay";
 
 	/* USER CODE BEGIN usb3dr */
+	dwc3:usb@48300000{
+		maximum-speed = "high-speed";
+		role-switch-default-mode = "peripheral";
+		usb-role-switch;
+	};
 	/* USER CODE END usb3dr */
 };
 
