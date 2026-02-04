@@ -44,6 +44,17 @@
 			no-map;
 		};
 	};
+
+	aliases {
+		serial0 = &uart5;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+	};
 	/* USER CODE END root */
 
 	clocks{
@@ -527,6 +538,8 @@
 	status = "okay";
 
 	/* USER CODE BEGIN uart5 */
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
 	/* USER CODE END uart5 */
 };
 
