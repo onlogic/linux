@@ -17,6 +17,9 @@
 #include "stm32mp25xxal-pinctrl.dtsi"
 
 /* USER CODE BEGIN includes */
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
 #include <dt-bindings/regulator/st,stm32mp25-regulator.h>
 /* USER CODE END includes */
 
@@ -55,6 +58,19 @@
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
+	};
+
+	gpio-leds{
+		compatible = "gpio-leds";
+		
+		led-green {
+			label = "led-green";
+			gpios = <&gpiob 15 GPIO_ACTIVE_LOW>;
+		};
+		led-orange {
+			label = "led-orange";
+			gpios = <&gpiob 11 GPIO_ACTIVE_LOW>;
+		};
 	};
 	/* USER CODE END root */
 
