@@ -47,6 +47,7 @@
 
 	aliases {
 		serial0 = &uart5;
+		mmc0 = &sdmmc1;
 	};
 
 	chosen {
@@ -500,6 +501,16 @@
 	status = "okay";
 
 	/* USER CODE BEGIN sdmmc1 */
+	non-removable;
+	no-sd;
+	no-sdio;
+	st,neg-edge;
+	bus-width = <8>;
+
+	vmmc-supply = <&scmi_v3v3>;
+	vqmmc-supply = <&scmi_vddio1>;
+	mmc-ddr-1_8v;
+	mmc-hs200-1_8v;
 	/* USER CODE END sdmmc1 */
 };
 
