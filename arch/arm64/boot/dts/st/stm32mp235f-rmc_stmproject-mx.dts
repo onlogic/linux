@@ -17,6 +17,7 @@
 #include "stm32mp25xxal-pinctrl.dtsi"
 
 /* USER CODE BEGIN includes */
+#include <dt-bindings/regulator/st,stm32mp25-regulator.h>
 /* USER CODE END includes */
 
 / {
@@ -523,6 +524,7 @@
 	status = "okay";
 
 	/* USER CODE BEGIN usb2_phy2 */
+	vdd33-supply = <&scmi_v3v3>;
 	/* USER CODE END usb2_phy2 */
 };
 
@@ -541,5 +543,37 @@
 };
 
 /* USER CODE BEGIN addons */
+&a35ss_syscfg {
+	status = "okay";
+};
+
+&arm_wdt {
+	timeout-sec = <32>;
+	status = "okay";
+};
+
+&scmi_regu {
+	scmi_vddio1: regulator@0 {
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+	scmi_vddio3: regulator@2 {
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+
+	scmi_vddcore: regulator@1a {
+		reg = <VOLTD_SCMI_REGU0>;
+		regulator-name = "vddcore";
+	};
+	scmi_v1v8: regulator@1b {
+		reg = <VOLTD_SCMI_REGU1>;
+		regulator-name = "v1v8";
+	};
+	scmi_v3v3: regulator@1c {
+		reg = <VOLTD_SCMI_REGU2>;
+		regulator-name = "v3v3";
+	};
+};
 /* USER CODE END addons */
 
