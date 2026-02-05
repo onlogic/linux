@@ -50,6 +50,7 @@
 
 	aliases{
 		serial0 = &uart5;
+		serial1 = &uart4;
 		mmc0 = &sdmmc1;
  		ethernet0 = &eth1;
 	};
@@ -574,6 +575,8 @@
 	status = "okay";
 
 	/* USER CODE BEGIN uart4 */
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
 	/* USER CODE END uart4 */
 };
 
