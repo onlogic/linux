@@ -455,6 +455,10 @@
 	status = "okay";
 
 	/* USER CODE BEGIN i2c1 */
+	ssif-bmc@10 {
+		compatible = "ssif-bmc";
+		reg = <0x20>;
+	};
 	/* USER CODE END i2c1 */
 };
 
