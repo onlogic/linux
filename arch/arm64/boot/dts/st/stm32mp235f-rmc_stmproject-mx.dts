@@ -685,5 +685,30 @@
 
 	gpio-line-names = "PI0", "PI1", "PI2", "PI3", "PI4", "PI5", "PI6", "PI7", "DI_0", "PI9", "PI10", "PI11", "PI12", "PI13", "PI14", "PI15";
 };
+
+&gpioz {
+	status = "okay";
+
+	gpio-line-names = "PZ0", "PZ1", "PZ2", "PZ3", "PZ4", "PZ5", "I2C_ISO_0", "I2C_ISO_1", "I2C_ISO_2", "PZ9";
+
+	i2c_iso_0: i2c-iso-0 {
+		gpio-hog;
+		gpios = <6 GPIO_ACTIVE_HIGH>;
+		output-high;
+		label = "i2c-iso-0";
+	};
+	i2c_iso_1: i2c-iso-1 {
+		gpio-hog;
+		gpios = <7 GPIO_ACTIVE_HIGH>;
+		output-low;
+		label = "i2c-iso-1";
+	};
+	i2c_iso_2: i2c-iso-2 {
+		gpio-hog;
+		gpios = <8 GPIO_ACTIVE_HIGH>;
+		output-high;
+		label = "i2c-iso-2";
+	};
+};
 /* USER CODE END addons */
 
