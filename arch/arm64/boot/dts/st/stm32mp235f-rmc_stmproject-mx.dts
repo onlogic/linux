@@ -710,5 +710,10 @@
 		label = "i2c-iso-2";
 	};
 };
+
+&iwdg2 {
+	timeout-sec = <32>;
+	status = "okay";
+};
 /* USER CODE END addons */
 
